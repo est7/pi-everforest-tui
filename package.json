@@ -1,0 +1,49 @@
+{
+  "name": "pi-everforest-tui",
+  "version": "0.1.0",
+  "description": "Everforest light and dark themes for Pi, plus optional matching TUI polish.",
+  "type": "module",
+  "license": "MIT",
+  "author": "est7",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-theme",
+    "everforest",
+    "tui",
+    "terminal",
+    "theme"
+  ],
+  "files": [
+    "extensions",
+    "scripts",
+    "themes",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build:themes": "node scripts/generate-themes.mjs",
+    "validate": "node scripts/validate-themes.mjs",
+    "pack:dry-run": "npm pack --dry-run --json"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/est7/pi-everforest-tui.git"
+  },
+  "bugs": {
+    "url": "https://github.com/est7/pi-everforest-tui/issues"
+  },
+  "homepage": "https://github.com/est7/pi-everforest-tui#readme",
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "pi": {
+    "themes": [
+      "./themes"
+    ],
+    "extensions": [
+      "./extensions/everforest-tui.ts"
+    ]
+  }
+}
