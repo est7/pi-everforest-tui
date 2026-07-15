@@ -46,6 +46,7 @@ For automatic light/dark switching, set this in `~/.pi/agent/settings.json`:
 /everforest-tui indicator on
 /everforest-tui status on
 /everforest-tui footer on
+/everforest-tui rainbow on
 /everforest-tui all on
 ```
 
@@ -63,7 +64,8 @@ Reset all enhancements:
 
 - `indicator` installs an Everforest pulse while Pi is working.
 - `status` adds a ready/working state with the current model.
-- `footer` installs a responsive two-line cockpit with project, Git branch, model/context window, context usage, token/cost totals, session name, and extension statuses.
+- `footer` installs a responsive cockpit with project, Git branch, model/context window, context usage, token/cost totals, and extension statuses.
+- `rainbow` paints the editor's top and bottom border with a continuous Everforest red-to-purple gradient. When the session has a name, it appears as an accent badge at the top-right of the editor; unnamed sessions show no badge.
 
 ## Development
 

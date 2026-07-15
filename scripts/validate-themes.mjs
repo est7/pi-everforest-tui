@@ -17,9 +17,29 @@ const optionalTokens = ["thinkingMax"];
 const requiredNames = new Set(["everforest-tui-dark", "everforest-tui-light"]);
 const allowedTokens = new Set([...requiredTokens, ...optionalTokens]);
 const hexPattern = /^#[0-9a-fA-F]{6}$/;
+const minimumContrast = {
+  text: 4.5,
+  subtext1: 4.5,
+  subtext0: 4.5,
+  overlay: 4.0,
+};
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
+}
+
+function relativeLuminance(hex) {
+  const channels = [1, 3, 5].map((offset) => Number.parseInt(hex.slice(offset, offset + 2), 16) / 255);
+  const [red, green, blue] = channels.map((channel) =>
+    channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4,
+  );
+  return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+}
+
+function contrastRatio(first, second) {
+  const lighter = Math.max(relativeLuminance(first), relativeLuminance(second));
+  const darker = Math.min(relativeLuminance(first), relativeLuminance(second));
+  return (lighter + 0.05) / (darker + 0.05);
 }
 
 function validateColor(value, vars, location) {
@@ -45,6 +65,11 @@ for (const file of files) {
   assert(theme.vars && typeof theme.vars === "object", `${file} is missing vars`);
   for (const [name, value] of Object.entries(theme.vars)) {
     assert(typeof value === "string" && hexPattern.test(value), `${file} var ${name} must be a 6-digit hex color`);
+  }
+  for (const [name, minimum] of Object.entries(minimumContrast)) {
+    assert(Object.hasOwn(theme.vars, name), `${file} is missing contrast-checked var ${name}`);
+    const ratio = contrastRatio(theme.vars.base, theme.vars[name]);
+    assert(ratio >= minimum, `${file} var ${name} contrast ${ratio.toFixed(2)} is below ${minimum}`);
   }
   assert(theme.colors && typeof theme.colors === "object", `${file} is missing colors`);
   const keys = Object.keys(theme.colors);
