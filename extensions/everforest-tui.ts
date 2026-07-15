@@ -1,3 +1,4 @@
+import { basename } from "node:path";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
@@ -100,11 +101,16 @@ function applyStatus(ctx: ExtensionContext, phase: StatusPhase = "ready"): void 
   ctx.ui.setStatus(STATUS_ID, `${icon} ${label} ${theme.fg("dim", "·")} ${model}`);
 }
 
+function sanitizeSingleLine(value: string): string {
+  return value.replace(/[\r\n\t]/g, " ").replace(/ +/g, " ").trim();
+}
+
 function statusValues(theme: Theme, statuses: ReadonlyMap<string, string>): string {
-  const values = [...statuses.entries()]
+  return [...statuses.entries()]
     .filter(([id]) => id !== STATUS_ID)
-    .map(([, value]) => value);
-  return values.length > 0 ? `${theme.fg("dim", " • ")}${values.join(theme.fg("dim", " • "))}` : "";
+    .map(([, value]) => sanitizeSingleLine(value))
+    .filter(Boolean)
+    .join(theme.fg("dim", " • "));
 }
 
 function applyFooter(ctx: ExtensionContext): void {
@@ -128,40 +134,45 @@ function applyFooter(ctx: ExtensionContext): void {
         if (width <= 0) return [""];
 
         const usage = getUsage(ctx);
-        const model = formatModelName(ctx.model?.id ?? "no model");
+        const project = basename(ctx.cwd) || ctx.cwd;
         const branch = footerData.getGitBranch();
         const branchName = branch ?? "no git";
-        const extras = statusValues(theme, footerData.getExtensionStatuses());
-        const compactStats = [
+        const sessionName = sanitizeSingleLine(ctx.sessionManager.getSessionName() ?? "untitled");
+        const model = formatModelName(ctx.model?.id ?? "no model");
+        const context = ctx.getContextUsage();
+        const contextWindow = context?.contextWindow ?? ctx.model?.contextWindow ?? 0;
+        const contextPercent = context?.percent;
+        const contextLabel = contextPercent === null || contextPercent === undefined
+          ? "ctx ?"
+          : `ctx ${contextPercent.toFixed(0)}%`;
+        const contextColor = contextPercent !== null && contextPercent !== undefined && contextPercent > 90
+          ? "error"
+          : contextPercent !== null && contextPercent !== undefined && contextPercent > 70
+            ? "warning"
+            : "success";
+        const separator = theme.fg("dim", " | ");
+        const projectAndBranch = `${theme.fg("warning", project)} ${theme.fg("dim", "(")}${theme.fg("success", branchName)}${theme.fg("dim", ")")}`;
+        const modelAndWindow = `${theme.fg("accent", model)} ${theme.fg("dim", `(${formatCount(contextWindow)} context)`)}`;
+        const fullLeft = [projectAndBranch, modelAndWindow, theme.fg(contextColor, contextLabel)].join(separator);
+        const fullRight = [
           theme.fg("accent", `↑${formatCount(usage.input)}`),
           theme.fg("success", `↓${formatCount(usage.output)}`),
           theme.fg("warning", `$${usage.cost.toFixed(3)}`),
         ].join(" ");
-        const fullLeft = [
-          theme.fg("warning", "◆"),
-          theme.fg("accent", model),
-          theme.fg("dim", "•"),
-          theme.fg("success", branch ? `git ${branchName}` : branchName),
-        ].join(" ") + extras;
-        const fullRight = [
-          theme.fg("accent", `in ${formatCount(usage.input)}`),
-          theme.fg("success", `out ${formatCount(usage.output)}`),
-          theme.fg("warning", `cost $${usage.cost.toFixed(3)}`),
-        ].join("  ");
+        const compactLeft = [projectAndBranch, theme.fg(contextColor, contextLabel)].join(separator);
+        const firstLine = footerFits(width, fullLeft, fullRight)
+          ? formatFooterLine(width, fullLeft, fullRight)
+          : footerFits(width, compactLeft, fullRight)
+            ? formatFooterLine(width, compactLeft, fullRight)
+            : truncateToWidth(compactLeft, width, "");
 
-        if (footerFits(width, fullLeft, fullRight)) return [formatFooterLine(width, fullLeft, fullRight)];
+        const session = `${theme.fg("dim", "session ")}${theme.fg("muted", sessionName)}`;
+        const extras = statusValues(theme, footerData.getExtensionStatuses());
+        const secondLine = extras && footerFits(width, session, extras)
+          ? formatFooterLine(width, session, extras)
+          : truncateToWidth(extras ? `${session}${separator}${extras}` : session, width, "");
 
-        const compactLeft = [
-          theme.fg("warning", "◆"),
-          theme.fg("accent", model),
-          theme.fg("dim", "•"),
-          theme.fg("success", branchName),
-        ].join(" ");
-        if (footerFits(width, compactLeft, compactStats)) {
-          return [formatFooterLine(width, compactLeft, compactStats)];
-        }
-
-        return [truncateToWidth(`${theme.fg("warning", "◆")} ${theme.fg("accent", model)} ${compactStats}`, width, "")];
+        return [firstLine, secondLine];
       },
     };
   });

@@ -63,7 +63,7 @@ Reset all enhancements:
 
 - `indicator` installs an Everforest pulse while Pi is working.
 - `status` adds a ready/working state with the current model.
-- `footer` installs a responsive model, git branch, token, and cost line.
+- `footer` installs a responsive two-line cockpit with project, Git branch, model/context window, context usage, token/cost totals, session name, and extension statuses.
 
 ## Development
 
