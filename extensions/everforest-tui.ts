@@ -1,13 +1,18 @@
 import { basename } from "node:path";
 import { CustomEditor, type ExtensionAPI, type ExtensionContext, type Theme } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { showCommandCenter } from "./everforest-tui/command-center.ts";
+import { shouldInstallEditorChrome } from "./everforest-tui/editor-composition.ts";
+import { showSettingsOverlay, type TuiFeature } from "./everforest-tui/settings-overlay.ts";
+import { placeFooterStatuses, type FooterStatusSegment } from "./everforest-tui/status-layout.ts";
+import { showThemeLab } from "./everforest-tui/theme-lab.ts";
+import { statusForWorkingSnapshot, WorkingPhaseTracker, type WorkingSnapshot } from "./everforest-tui/working-phase.ts";
 
 const STATUS_ID = "everforest-tui";
 const STATE_CUSTOM_TYPE = "everforest-tui-state";
 
-type Feature = "indicator" | "status" | "footer" | "rainbow";
+type Feature = TuiFeature;
 type Toggle = "on" | "off";
-type StatusPhase = "ready" | "working";
 type PersistedState = Record<Feature, boolean>;
 
 const state: PersistedState = {
@@ -46,12 +51,27 @@ const LIGHT_RAINBOW: readonly Rgb[] = [
   [223, 105, 186],
 ];
 
+// Factory ownership/composition is adapted from pi-zentui@0.8.0 (MIT).
+// See THIRD_PARTY_NOTICES.md. The tag prevents cleanup from replacing an editor
+// that another extension installed after Everforest.
+const EVERFOREST_EDITOR_FACTORY = Symbol.for("pi-everforest-tui.editor-factory");
+const EVERFOREST_EDITOR_BASE = Symbol.for("pi-everforest-tui.editor-base-factory");
+
+type EditorFactory = NonNullable<ReturnType<ExtensionContext["ui"]["getEditorComponent"]>>;
+type TaggedEditorFactory = EditorFactory & {
+  [EVERFOREST_EDITOR_FACTORY]?: true;
+  [EVERFOREST_EDITOR_BASE]?: EditorFactory;
+};
+
 let indicatorInstalled = false;
 let footerInstalled = false;
 let rainbowInstalled = false;
-let previousEditorFactory: ReturnType<ExtensionContext["ui"]["getEditorComponent"]>;
+let installedEditorFactory: EditorFactory | undefined;
+let wrappedEditorFactory: EditorFactory | undefined;
+let requestFooterRender: (() => void) | undefined;
 let currentThinkingLevel = "off";
 let gitDirty = false;
+const workingPhases = new WorkingPhaseTracker();
 
 function formatCount(value: number): string {
   if (value < 1000) return `${value}`;
@@ -70,6 +90,13 @@ function footerFits(width: number, left: string, right: string): boolean {
 function formatFooterLine(width: number, left: string, right: string): string {
   const padding = Math.max(1, width - visibleWidth(left) - visibleWidth(right));
   return truncateToWidth(`${left}${" ".repeat(padding)}${right}`, width, "");
+}
+
+function formatFooterLineWithCenter(width: number, left: string, center: string, right: string): string {
+  const spacing = width - visibleWidth(left) - visibleWidth(center) - visibleWidth(right);
+  if (!center || spacing < 4) return formatFooterLine(width, left, right);
+  const leftGap = Math.floor(spacing / 2);
+  return `${left}${" ".repeat(leftGap)}${center}${" ".repeat(spacing - leftGap)}${right}`;
 }
 
 function getUsage(ctx: ExtensionContext): { input: number; output: number; cost: number } {
@@ -130,33 +157,45 @@ function applyIndicator(ctx: ExtensionContext): void {
   indicatorInstalled = true;
 }
 
-function applyStatus(ctx: ExtensionContext, phase: StatusPhase = "ready"): void {
+function applyStatus(ctx: ExtensionContext, snapshot: WorkingSnapshot = workingPhases.getSnapshot()): void {
   if (!ctx.hasUI) return;
 
-  if (!state.status) {
+  const presentation = state.status ? statusForWorkingSnapshot(snapshot) : undefined;
+  if (!presentation) {
     ctx.ui.setStatus(STATUS_ID, undefined);
     return;
   }
 
   const theme = ctx.ui.theme;
-  const working = phase === "working";
-  const color = working ? "warning" : "success";
-  const icon = theme.fg(color, working ? "⋯" : "◆");
-  const label = theme.fg(color, working ? "working" : "ready");
-  const model = theme.fg("accent", formatModelName(ctx.model?.id ?? "no model"));
-  ctx.ui.setStatus(STATUS_ID, `${icon} ${label} ${theme.fg("dim", "·")} ${model}`);
+  const icon = theme.fg(presentation.color, presentation.icon);
+  const label = theme.fg(presentation.color, presentation.label);
+  ctx.ui.setStatus(STATUS_ID, `${icon} ${label}`);
+}
+
+function applyWorkingPresentation(ctx: ExtensionContext): void {
+  if (!ctx.hasUI) return;
+  const snapshot = workingPhases.getSnapshot();
+  applyStatus(ctx, snapshot);
+  if (!state.indicator || snapshot.phase === "idle") {
+    ctx.ui.setWorkingMessage();
+  } else if (snapshot.phase === "thinking") {
+    ctx.ui.setWorkingMessage("Thinking…");
+  } else if (snapshot.phase === "toolUse") {
+    ctx.ui.setWorkingMessage(`Running ${snapshot.toolName ?? "tool"}…`);
+  } else {
+    ctx.ui.setWorkingMessage("Working…");
+  }
+  requestFooterRender?.();
 }
 
 function sanitizeSingleLine(value: string): string {
   return value.replace(/[\r\n\t]/g, " ").replace(/ +/g, " ").trim();
 }
 
-function statusValues(theme: Theme, statuses: ReadonlyMap<string, string>): string {
+function statusSegments(statuses: ReadonlyMap<string, string>): FooterStatusSegment[] {
   return [...statuses.entries()]
-    .filter(([id]) => id !== STATUS_ID)
-    .map(([, value]) => sanitizeSingleLine(value))
-    .filter(Boolean)
-    .join(theme.fg("dim", " • "));
+    .map(([id, value]) => ({ id, text: sanitizeSingleLine(value) }))
+    .filter((segment) => Boolean(segment.text));
 }
 
 function applyFooter(ctx: ExtensionContext): void {
@@ -171,10 +210,14 @@ function applyFooter(ctx: ExtensionContext): void {
   }
 
   ctx.ui.setFooter((tui, theme, footerData) => {
+    requestFooterRender = () => tui.requestRender();
     const unsubscribe = footerData.onBranchChange(() => tui.requestRender());
 
     return {
-      dispose: unsubscribe,
+      dispose() {
+        unsubscribe();
+        requestFooterRender = undefined;
+      },
       invalidate() {},
       render(width: number): string[] {
         if (width <= 0) return [""];
@@ -221,14 +264,21 @@ function applyFooter(ctx: ExtensionContext): void {
           `${theme.fg("muted", "cost ")}${theme.fg("warning", `$${usage.cost.toFixed(3)}`)}`,
         ].join(" ");
         const compactLeft = [projectAndBranch, effort, contextStatus].join(separator);
-        const firstLine = footerFits(width, fullLeft, fullRight)
-          ? formatFooterLine(width, fullLeft, fullRight)
-          : footerFits(width, compactLeft, fullRight)
-            ? formatFooterLine(width, compactLeft, fullRight)
-            : truncateToWidth(compactLeft, width, "");
-
-        const extras = statusValues(theme, footerData.getExtensionStatuses());
-        return extras ? [firstLine, truncateToWidth(extras, width, "")] : [firstLine];
+        const left = footerFits(width, fullLeft, fullRight) ? fullLeft : compactLeft;
+        const right = footerFits(width, left, fullRight) ? fullRight : "";
+        const statusSeparator = theme.fg("dim", " • ");
+        const placement = placeFooterStatuses(
+          statusSegments(footerData.getExtensionStatuses()),
+          Math.max(0, width - visibleWidth(left) - visibleWidth(right) - 4),
+          width,
+          statusSeparator,
+        );
+        const firstLine = placement.inline
+          ? formatFooterLineWithCenter(width, left, placement.inline, right)
+          : right
+            ? formatFooterLine(width, left, right)
+            : truncateToWidth(left, width, "");
+        return placement.overflow ? [firstLine, placement.overflow] : [firstLine];
       },
     };
   });
@@ -277,22 +327,17 @@ function sessionBadge(theme: Theme, sessionName: string, width: number): string 
     .join("") + "\x1b[39m\x1b[49m";
 }
 
-function applyRainbow(ctx: ExtensionContext): void {
-  if (ctx.mode !== "tui") return;
+function isEverforestEditorFactory(factory: EditorFactory | undefined): factory is TaggedEditorFactory {
+  return Boolean((factory as TaggedEditorFactory | undefined)?.[EVERFOREST_EDITOR_FACTORY]);
+}
 
-  if (!state.rainbow) {
-    if (rainbowInstalled) {
-      ctx.ui.setEditorComponent(previousEditorFactory);
-      previousEditorFactory = undefined;
-      rainbowInstalled = false;
-    }
-    return;
-  }
-  if (rainbowInstalled) return;
+function getEverforestEditorBase(factory: EditorFactory | undefined): EditorFactory | undefined {
+  return (factory as TaggedEditorFactory | undefined)?.[EVERFOREST_EDITOR_BASE];
+}
 
-  previousEditorFactory = ctx.ui.getEditorComponent();
-  ctx.ui.setEditorComponent((tui, editorTheme, keybindings) => {
-    const editor = previousEditorFactory?.(tui, editorTheme, keybindings) ?? new CustomEditor(tui, editorTheme, keybindings);
+function createEverforestEditorFactory(ctx: ExtensionContext, baseFactory: EditorFactory | undefined): TaggedEditorFactory {
+  const factory = ((tui, editorTheme, keybindings) => {
+    const editor = baseFactory?.(tui, editorTheme, keybindings) ?? new CustomEditor(tui, editorTheme, keybindings);
     const render = editor.render.bind(editor);
     editor.render = (width: number) => {
       const lines = render(width);
@@ -308,15 +353,43 @@ function applyRainbow(ctx: ExtensionContext): void {
       return lines;
     };
     return editor;
-  });
+  }) as TaggedEditorFactory;
+  factory[EVERFOREST_EDITOR_FACTORY] = true;
+  if (baseFactory) factory[EVERFOREST_EDITOR_BASE] = baseFactory;
+  return factory;
+}
+
+function applyRainbow(ctx: ExtensionContext): void {
+  if (ctx.mode !== "tui") return;
+
+  const currentFactory = ctx.ui.getEditorComponent();
+  if (!state.rainbow) {
+    if (isEverforestEditorFactory(currentFactory)) {
+      ctx.ui.setEditorComponent(getEverforestEditorBase(currentFactory));
+    }
+    rainbowInstalled = false;
+    installedEditorFactory = undefined;
+    wrappedEditorFactory = undefined;
+    return;
+  }
+
+  if (!shouldInstallEditorChrome(currentFactory, installedEditorFactory, isEverforestEditorFactory)) {
+    rainbowInstalled = true;
+    return;
+  }
+
+  wrappedEditorFactory = currentFactory;
+  const factory = createEverforestEditorFactory(ctx, currentFactory);
+  ctx.ui.setEditorComponent(factory);
+  installedEditorFactory = factory;
   rainbowInstalled = true;
 }
 
 function applyAll(ctx: ExtensionContext): void {
   applyIndicator(ctx);
-  applyStatus(ctx);
   applyFooter(ctx);
   applyRainbow(ctx);
+  applyWorkingPresentation(ctx);
 }
 
 function readPersistedState(ctx: ExtensionContext): PersistedState | undefined {
@@ -351,9 +424,9 @@ function restoreState(ctx: ExtensionContext): void {
 function setFeature(pi: ExtensionAPI, ctx: ExtensionContext, feature: Feature, toggle: Toggle, persist = true): void {
   state[feature] = toggle === "on";
   if (feature === "indicator") applyIndicator(ctx);
-  if (feature === "status") applyStatus(ctx);
   if (feature === "footer") applyFooter(ctx);
   if (feature === "rainbow") applyRainbow(ctx);
+  if (feature === "indicator" || feature === "status") applyWorkingPresentation(ctx);
   if (persist) persistState(pi);
 }
 
@@ -366,10 +439,6 @@ function reset(pi: ExtensionAPI, ctx: ExtensionContext): void {
   persistState(pi);
 }
 
-function statusLine(): string {
-  return `indicator=${state.indicator ? "on" : "off"}, status=${state.status ? "on" : "off"}, footer=${state.footer ? "on" : "off"}, rainbow=${state.rainbow ? "on" : "off"}`;
-}
-
 export default function everforestTui(pi: ExtensionAPI) {
   pi.events.on("everforest-tui:defaults", (value: unknown) => {
     if (!value || typeof value !== "object") return;
@@ -379,14 +448,32 @@ export default function everforestTui(pi: ExtensionAPI) {
     }
   });
 
+  pi.registerCommand("everforest", {
+    description: "Open the Everforest command center for loaded extensions, prompts, and skills.",
+    handler: async (_args, ctx) => {
+      if (!ctx.hasUI) return;
+      await showCommandCenter(pi, ctx);
+    },
+  });
+
+  pi.registerCommand("everforest-theme-lab", {
+    description: "Preview the active theme's palette, Markdown, tools, diffs, syntax, and thinking states.",
+    handler: async (_args, ctx) => {
+      if (!ctx.hasUI) return;
+      await showThemeLab(ctx);
+    },
+  });
+
   pi.registerCommand("everforest-tui", {
-    description: "Toggle optional Everforest TUI polish: indicator, status, and compact footer.",
+    description: "Configure optional Everforest indicator, status, footer, and rainbow editor chrome.",
     handler: async (args, ctx) => {
       if (!ctx.hasUI) return;
       const [feature, toggle] = args.trim().toLowerCase().split(/\s+/).filter(Boolean);
 
       if (!feature) {
-        ctx.ui.notify(`Everforest TUI: ${statusLine()}. Usage: /everforest-tui [indicator|status|footer|rainbow|all] [on|off], or /everforest-tui reset`, "info");
+        await showSettingsOverlay(ctx, state, (selectedFeature, enabled) => {
+          setFeature(pi, ctx, selectedFeature, enabled ? "on" : "off");
+        });
         return;
       }
       if (feature === "reset") {
@@ -418,32 +505,68 @@ export default function everforestTui(pi: ExtensionAPI) {
 
   pi.on("session_start", async (_event, ctx) => {
     currentThinkingLevel = pi.getThinkingLevel();
+    workingPhases.endTurn();
     await refreshGitDirty(pi, ctx);
     restoreState(ctx);
+    setTimeout(() => {
+      if (state.rainbow) applyRainbow(ctx);
+    }, 0);
   });
   pi.on("session_tree", async (_event, ctx) => {
-    await refreshGitDirty(pi, ctx);
+    workingPhases.endTurn();
     restoreState(ctx);
-  });
-  pi.on("turn_start", async (_event, ctx) => applyStatus(ctx, "working"));
-  pi.on("turn_end", async (_event, ctx) => {
     await refreshGitDirty(pi, ctx);
-    applyStatus(ctx, "ready");
+    requestFooterRender?.();
   });
-  pi.on("model_select", async (_event, ctx) => applyStatus(ctx));
+  pi.on("turn_start", async (_event, ctx) => {
+    workingPhases.startTurn();
+    applyWorkingPresentation(ctx);
+  });
+  pi.on("message_update", async (event, ctx) => {
+    const type = event.assistantMessageEvent.type;
+    if (type === "thinking_start") {
+      workingPhases.setThinking(true);
+      applyWorkingPresentation(ctx);
+    } else if (type === "thinking_end") {
+      workingPhases.setThinking(false);
+      applyWorkingPresentation(ctx);
+    }
+  });
+  pi.on("tool_execution_start", async (event, ctx) => {
+    workingPhases.openTool(event.toolCallId, event.toolName);
+    applyWorkingPresentation(ctx);
+  });
+  pi.on("tool_execution_end", async (event, ctx) => {
+    workingPhases.closeTool(event.toolCallId);
+    applyWorkingPresentation(ctx);
+  });
+  pi.on("turn_end", async (_event, ctx) => {
+    workingPhases.endTurn();
+    applyWorkingPresentation(ctx);
+    await refreshGitDirty(pi, ctx);
+    requestFooterRender?.();
+  });
+  pi.on("model_select", async (_event, ctx) => applyWorkingPresentation(ctx));
   pi.on("thinking_level_select", async (event, ctx) => {
     currentThinkingLevel = event.level;
-    applyStatus(ctx);
+    applyWorkingPresentation(ctx);
   });
   pi.on("session_shutdown", async (_event, ctx) => {
+    workingPhases.endTurn();
     if (!ctx.hasUI) return;
     ctx.ui.setStatus(STATUS_ID, undefined);
+    ctx.ui.setWorkingMessage();
     if (indicatorInstalled) ctx.ui.setWorkingIndicator();
     if (footerInstalled) ctx.ui.setFooter(undefined);
-    if (rainbowInstalled) ctx.ui.setEditorComponent(previousEditorFactory);
+    const currentFactory = ctx.ui.getEditorComponent();
+    if (isEverforestEditorFactory(currentFactory)) {
+      ctx.ui.setEditorComponent(getEverforestEditorBase(currentFactory) ?? wrappedEditorFactory);
+    }
     indicatorInstalled = false;
     footerInstalled = false;
     rainbowInstalled = false;
-    previousEditorFactory = undefined;
+    installedEditorFactory = undefined;
+    wrappedEditorFactory = undefined;
+    requestFooterRender = undefined;
   });
 }
