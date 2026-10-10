@@ -4,6 +4,7 @@ import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { showCommandCenter } from "./everforest-tui/command-center.ts";
 import { shouldInstallEditorChrome } from "./everforest-tui/editor-composition.ts";
 import { showSettingsOverlay, type TuiFeature } from "./everforest-tui/settings-overlay.ts";
+import { sessionBadgeLabel } from "./everforest-tui/session-badge.ts";
 import { placeFooterStatuses, type FooterStatusSegment } from "./everforest-tui/status-layout.ts";
 import { showThemeLab } from "./everforest-tui/theme-lab.ts";
 import { statusForWorkingSnapshot, WorkingPhaseTracker, type WorkingSnapshot } from "./everforest-tui/working-phase.ts";
@@ -315,7 +316,7 @@ function sessionBadge(theme: Theme, sessionName: string, width: number): string 
   if (!sessionName || width < 12) return "";
 
   const maxNameWidth = Math.max(1, Math.min(24, Math.floor(width / 3) - 2));
-  const name = truncateToWidth(sessionName, maxNameWidth, "");
+  const name = sessionBadgeLabel(sessionName, maxNameWidth);
   const characters = [...` ${name} `];
   const palette = theme.name?.includes("light") ? LIGHT_RAINBOW : DARK_RAINBOW;
 

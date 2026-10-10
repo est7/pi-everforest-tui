@@ -1,6 +1,6 @@
 {
   "name": "pi-everforest-tui",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Everforest light and dark themes for Pi, plus optional matching TUI polish.",
   "type": "module",
   "license": "MIT",
